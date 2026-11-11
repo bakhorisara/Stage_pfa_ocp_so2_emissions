@@ -1,0 +1,159 @@
+# =============================================================================
+# config.yaml -- Pipeline de prevision des emissions SO2 (unite acide sulfurique)
+# SEUL endroit ou modifier un parametre. Rien en dur dans les notebooks / so2lib.
+# Par defaut : donnees SYNTHETIQUES (python make_synthetic_data.py).
+# Les donnees industrielles reelles sont confidentielles et ne sont pas publiees.
+# =============================================================================
+
+# true = comparer chaque checkpoint aux valeurs obtenues sur les donnees reelles
+# (utile uniquement avec le fichier industriel d'origine).
+reference_checks: false
+
+data:
+  csv_path: "data/synthetic_so2.csv"
+  date_col: "Date"
+  target_col: "SO2_EMISSIONS"
+  # 12 voies brutes (Date exclu, AIR_PRESSION absente de ce fichier)
+  raw_channels:
+    - INPUT_SULF_FLOW
+    - TEMP_FOUR
+    - TURBO_SPEED
+    - INLET_TEMP_MASS_1
+    - INLET_TEMP_MASS_2
+    - INLET_TEMP_MASS_3
+    - INLET_TEMP_MASS_4
+    - OUTLET_TEMP_MASS_1
+    - OUTLET_TEMP_MASS_2
+    - OUTLET_TEMP_MASS_3
+    - OUTLET_TEMP_MASS_4
+    - SO2_EMISSIONS
+
+# -----------------------------------------------------------------------------
+# NETTOYAGE -- codes defaut deguises en mesures. NaN AVANT dropna(). Jamais
+# d'imputation / interpolation / clip. Comparaison par np.isclose (piege float32).
+# -----------------------------------------------------------------------------
+cleaning:
+  isclose_rtol: 1.0e-6
+  isclose_atol: 1.0e-3
+
+  # Decouverte automatique : une valeur est un code defaut si elle est repetee
+  # >= min_repeats fois ET viole une borne physique evidente.
+  sentinel_discovery:
+    min_repeats: 50
+
+  # Liste de secours (codes defaut connus d'autres fichiers de la meme ligne).
+  # Appliquee en plus de la decouverte auto, par np.isclose.
+  known_sentinels: [-999.9, -711.092, -1185.153, -1422.184, -622.4513,
+                    -2962.88257, -5214.67334, -5333.18848, -5925.765, -18962.447]
+
+  # Bornes physiques -- la regle qui fait le vrai travail.
+  # -1.0 = tolerance bruit de fond ; -273.15 = zero absolu.
+  physical_bounds:
+    SO2_EMISSIONS:      {min: -1.0}
+    INPUT_SULF_FLOW:    {min: -1.0}
+    TURBO_SPEED:        {min: -1.0}
+    TEMP_FOUR:          {min: -273.15}
+    INLET_TEMP_MASS_1:  {min: -273.15}
+    INLET_TEMP_MASS_2:  {min: -273.15}
+    INLET_TEMP_MASS_3:  {min: -273.15}
+    INLET_TEMP_MASS_4:  {min: -273.15}
+    OUTLET_TEMP_MASS_1: {min: -273.15}
+    OUTLET_TEMP_MASS_2: {min: -273.15}
+    OUTLET_TEMP_MASS_3: {min: -273.15}
+    OUTLET_TEMP_MASS_4: {min: -273.15}
+
+  drop_duplicate_timestamps: true   # garder le premier (0 attendu sur ce fichier)
+
+# -----------------------------------------------------------------------------
+# BLOCS -- sequences de minutes consecutives (resolution 1 min).
+# -----------------------------------------------------------------------------
+blocks:
+  freq_minutes: 1
+
+# -----------------------------------------------------------------------------
+# GRILLE DE FAISABILITE -- la fenetre de lookback se MESURE, ne se suppose pas.
+# -----------------------------------------------------------------------------
+feasibility_grid:
+  lookback_candidates_min: [120, 180, 240]
+  horizon_candidates_min: [5, 15, 30, 45, 55]
+  recent_days_window: 10     # part des fenetres concentree sur les N derniers jours
+
+# -----------------------------------------------------------------------------
+# FEATURES -- Delta_T + lags + moyennes mobiles, calcules PAR BLOC.
+# -----------------------------------------------------------------------------
+features:
+  lookback_min: 120          # retenu apres lecture de la grille de faisabilite
+  delta_t_pairs: [1, 2, 3, 4] # Delta_T_i = OUTLET_TEMP_MASS_i - INLET_TEMP_MASS_i
+  lags_min: [1, 5, 15, 30, 60, 90, 120]
+  rolling_min: [5, 15, 30, 60, 120]
+  include_raw_target_as_feature: false  # lags/rolling du SO2 gardes, valeur brute t exclue
+  # --- enrichissements (mettre a [] / false pour retrouver le jeu de base 159 features)
+  rolling_std_min: [15, 30, 60]         # volatilite recente
+  diff_min: [5, 15, 30, 60]             # variations (momentum) sur chaque voie
+  delta_t_lags_min: [5, 15, 30, 60]     # lags des ecarts de temperature
+  add_time_features: true               # sin/cos heure-du-jour + jour-de-semaine
+
+# -----------------------------------------------------------------------------
+# CIBLE -- variation, jamais le niveau.  y_h = SO2[t+h] - SO2[t]
+# -----------------------------------------------------------------------------
+target:
+  horizon_min: 55                          # retenu apres balayage
+  horizon_sweep_min: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]
+
+# -----------------------------------------------------------------------------
+# VALIDATION -- glissante (walk-forward), embargo, plancher d'entrainement.
+# -----------------------------------------------------------------------------
+validation:
+  n_folds: 5
+  scheme: "expanding"        # train = tout le passe jusqu'au repli
+  min_train_frac: 0.40       # plancher avant le 1er repli teste (evite Lasso a zero)
+  # embargo (minutes) purge de part et d'autre de chaque coupure.
+  # Laisser 'auto' => lookback_min + horizon_min.
+  embargo_min: auto
+  alpha_grid_log10: [-4, -3, -2, -1, 0]   # grille alpha du Lasso (10**x)
+  ts_split_n: 5                            # TimeSeriesSplit pour le choix d'alpha
+  # alpha choisi par TimeSeriesSplit sur le probleme retenu (h=55) : 1.0 a CHAQUE
+  # repli. On le fige pour le balayage d'horizon (55 ajustements Lasso sinon) ;
+  # le resultat retenu (h=55) garde, lui, la selection complete par CV.
+  fixed_alpha: 1.0
+
+# -----------------------------------------------------------------------------
+# FUITE -- 4 protocoles + controle negatif.
+# -----------------------------------------------------------------------------
+leakage:
+  test_frac: 0.20
+  alert_r2_threshold: 0.5    # interprete a la lumiere du retour-a-la-moyenne
+  negative_control_repeats: 3
+
+# -----------------------------------------------------------------------------
+# PHASE 2 -- validation des leviers + controleur MPC simule.
+# -----------------------------------------------------------------------------
+phase2:
+  lever_candidates:
+    - INPUT_SULF_FLOW
+    - TEMP_FOUR
+    - TURBO_SPEED
+    - INLET_TEMP_MASS_1
+    - INLET_TEMP_MASS_2
+    - INLET_TEMP_MASS_3
+    - INLET_TEMP_MASS_4
+    - OUTLET_TEMP_MASS_4
+  empirical_shift_window_min: 60   # X dernieres minutes d'historique decalees
+  empirical_sample_windows: 3000   # nb de fenetres test echantillonnees
+  empirical_shift_sigmas: 1.0      # amplitude du decalage = k * sigma_capteur
+  amplitude_ratio_warn: 3.0        # |analytique / empirique| au-dela => peu fiable
+
+  bimodality:
+    min_separation_sigmas: 2.0     # |mu1-mu2| > k * max(sigma1,sigma2)
+    min_component_weight: 0.05     # poids mini d'un mode pour parler de bimodalite
+    bic_gain_min: 20               # BIC(1) - BIC(2) au-dela => 2 composantes retenues
+
+  controller:
+    threshold_percentiles: [50, 75, 90, 95, 99]
+    w_overshoot: 1.0
+    w_move: 0.05
+    w_deviation: 0.02
+    bound_percentiles: [1, 99]     # bornes actionneur = [P1, P99] du capteur
+    slew_percentile: 95            # slew max = P95 de |Delta capteur| minute-a-minute
+
+random_seed: 0

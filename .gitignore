@@ -1,0 +1,23 @@
+# donnees (les donnees industrielles reelles ne doivent JAMAIS etre publiees)
+data/
+*.csv
+*.parquet
+!docs/**/*.csv
+
+# resultats regeneres par le pipeline
+outputs/
+*.pkl
+*.log
+
+# Python / Jupyter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.ipynb
+.venv/
+venv/
+
+# fichiers parasites
+~$*
+.DS_Store
+Thumbs.db
